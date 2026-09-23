@@ -400,6 +400,12 @@ self.addEventListener('fetch',e=>{
 """
 
 
+# ── 路由：健康检查（免登录，供 Render 探活）────────────────────────────────
+@app.route("/health")
+def health():
+    return jsonify(ok=True), 200
+
+
 # ── 路由：登录相关 ──────────────────────────────────────────────────────────
 @app.route("/login", methods=["GET", "POST"])
 def login():

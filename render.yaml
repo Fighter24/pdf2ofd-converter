@@ -1,0 +1,19 @@
+# Render 部署配置
+# 文档：https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: pdf2ofd
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn web_app:app -w 2 -t 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: PDF2OFD_MAX_MB
+        value: "100"
+      # 以下两项属于机密，请在 Render 控制台手动填写（不要写真实值在这里）：
+      # ACCESS_PASSWORD  访问密码
+      # SECRET_KEY       Cookie 加密密钥（随机长字符串）

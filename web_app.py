@@ -16,8 +16,11 @@ PDF 转 OFD —— Web 可视化界面（生产版）
 """
 
 import os
+import io
 import time
 import uuid
+import shutil
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -292,7 +295,7 @@ function render(){
     let stHtml='';
     if(f.status==='wait') stHtml='<span class="st wait">等待</span>';
     else if(f.status==='run') stHtml='<span class="st run"><span class="spin"></span>转换中</span>';
-    else if(f.status==='ok') stHtml='<button class="dl" onclick="downloadFile(\''+f.taskId+'\',\''+f.name+'\')">下载 OFD</button>';
+    else if(f.status==='ok') stHtml='<span class="st ok">✓ 已保存</span>';
     else stHtml='<span class="st fail">失败</span>';
     const name=document.createElement('span'); name.className='name'; name.textContent=f.name;
     const size=document.createElement('span'); size.className='size'; size.textContent=fmtSize(f.size);
@@ -331,10 +334,21 @@ async function convertOne(f){
   try{
     const r=await fetch('/api/convert',{method:'POST',body:fd});
     if(r.status===401){location.href='/login';return;}
-    const data=await r.json();
-    if(r.ok&&data.ok){f.status='ok';f.taskId=data.taskId;}
-    else{f.status='fail';alert(data.error||'转换失败');}
-  }catch(err){f.status='fail';alert('网络错误，请重试');}
+    const ct=r.headers.get('content-type')||'';
+    if(r.ok && ct.includes('octet-stream')){
+      const blob=await r.blob();
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url; a.download=f.name.replace(/\.pdf$/i,'')+'.ofd';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),5000);
+      f.status='ok';
+    }else{
+      let msg='转换失败';
+      try{ const d=await r.json(); msg=d.error||msg; }catch(e){}
+      f.status='fail'; alert(msg);
+    }
+  }catch(err){ f.status='fail'; alert('网络错误，请重试'); }
   render();
 }
 
@@ -345,24 +359,15 @@ goBtn.onclick=async()=>{
   render();
 };
 
-async function downloadFile(taskId,fileName){
-  try{
-    const r=await fetch('/download/'+taskId);
-    if(r.status===401){location.href='/login';return;}
-    if(!r.ok){alert('下载失败，请重试');return;}
-    const blob=await r.blob();
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url; a.download=fileName; a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),5000);
-  }catch(err){alert('网络错误，请重试');}
-}
-
 render();
 
+// 注销旧的 Service Worker 并清空其缓存（消除历史缓存导致的异常）
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  navigator.serviceWorker.getRegistrations().then(regs=>{
+    regs.forEach(r=>r.unregister());
+  }).catch(()=>{});
 }
+if(window.caches){ caches.keys().then(ks=>ks.forEach(k=>caches.delete(k))).catch(()=>{}); }
 
 const installBar=document.getElementById('installBar'),
       installBtn=document.getElementById('installBtn'),
@@ -466,52 +471,46 @@ def api_convert():
         return jsonify({"ok": False, "error": "仅支持 PDF"}), 400
 
     pages = (request.form.get("pages") or "all").strip() or "all"
-    task_id = uuid.uuid4().hex
-    tdir = WORK_DIR / task_id
-    tdir.mkdir(parents=True, exist_ok=True)
-
     safe = Path(f.filename).name
-    src = tdir / safe
-    f.save(src)
     out_name = Path(safe).stem + ".ofd"
+
+    # 使用独立临时目录，请求结束后整个删除（不跨请求保留）
+    import tempfile
+    tdir = Path(tempfile.mkdtemp(prefix="p2o_"))
+    src = tdir / safe
     dst = tdir / out_name
 
+    def _cleanup(resp):
+        shutil.rmtree(tdir, ignore_errors=True)
+        return resp
+
     try:
+        f.save(src)
         pdf2ofd_convert(str(src), str(dst), pages=pages, verbose=False)
         if not dst.exists():
             raise RuntimeError("未生成 OFD 文件")
-        (tdir / "download_name.txt").write_text(out_name, encoding="utf-8")
-        try:
-            src.unlink()
-        except Exception:
-            pass
-        return jsonify({"ok": True, "task_id": task_id,
-                        "name": out_name, "size": dst.stat().st_size})
+        data = dst.read_bytes()
+        resp = send_file(
+            io.BytesIO(data),
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name=out_name,
+        )
+        # 注册请求结束清理
+        from flask import after_this_request
+        after_this_request(_cleanup)
+        return resp
     except Exception as e:
         traceback.print_exc()
+        shutil.rmtree(tdir, ignore_errors=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/download/<task_id>")
+# 旧的分步下载接口已废弃（保留指向以兼容旧链接）
+@app.route("/download/<path:_unused>")
 @login_required
-def download(task_id):
-    if not re_safe(task_id):
-        abort(404)
-    tdir = WORK_DIR / task_id
-    if not tdir.is_dir():
-        abort(404)
-    ofds = list(tdir.glob("*.ofd"))
-    if not ofds:
-        abort(404)
-    dl_name = ofds[0].name
-    name_file = tdir / "download_name.txt"
-    if name_file.exists():
-        dl_name = name_file.read_text(encoding="utf-8").strip() or dl_name
-    return send_file(str(ofds[0]), as_attachment=True, download_name=dl_name)
-
-
-def re_safe(tid):
-    return len(tid) == 32 and all(c in "0123456789abcdef" for c in tid)
+def download(_unused):
+    return jsonify({"ok": False, "error": "请返回页面重新转换，文件将在转换后自动下载"}), 410
 
 
 # ── 公共资源（PWA/图标，不涉密，无需登录）──────────────────────────────────

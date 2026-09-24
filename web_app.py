@@ -292,7 +292,7 @@ function render(){
     let stHtml='';
     if(f.status==='wait') stHtml='<span class="st wait">等待</span>';
     else if(f.status==='run') stHtml='<span class="st run"><span class="spin"></span>转换中</span>';
-    else if(f.status==='ok') stHtml='<a class="dl" href="/download/'+f.taskId+'">下载 OFD</a>';
+    else if(f.status==='ok') stHtml='<button class="dl" onclick="downloadFile(\''+f.taskId+'\',\''+f.name+'\')">下载 OFD</button>';
     else stHtml='<span class="st fail">失败</span>';
     const name=document.createElement('span'); name.className='name'; name.textContent=f.name;
     const size=document.createElement('span'); size.className='size'; size.textContent=fmtSize(f.size);
@@ -342,7 +342,21 @@ goBtn.onclick=async()=>{
   pagesInput.disabled=true;
   for(const f of queue){ if(f.status==='wait'||f.status==='fail'){ await convertOne(f);} }
   pagesInput.disabled=false;
+  render();
 };
+
+async function downloadFile(taskId,fileName){
+  try{
+    const r=await fetch('/download/'+taskId);
+    if(r.status===401){location.href='/login';return;}
+    if(!r.ok){alert('下载失败，请重试');return;}
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=fileName; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+  }catch(err){alert('网络错误，请重试');}
+}
 
 render();
 
